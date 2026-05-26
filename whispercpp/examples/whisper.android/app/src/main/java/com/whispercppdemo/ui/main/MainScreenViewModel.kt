@@ -176,8 +176,8 @@ class MainScreenViewModel(private val application: Application) : ViewModel() {
     companion object {
         fun factory() = viewModelFactory {
             initializer {
-                val application = this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY] as Application
-                MainScreenViewModel(application)
+                val app = this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY] as Application
+                MainScreenViewModel(app)
             }
         }
     }
