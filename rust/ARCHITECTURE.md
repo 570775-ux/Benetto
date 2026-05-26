@@ -70,7 +70,7 @@ rust/
 **Rationale:** Reviewers flagged risk: SOS bug → kills normal transcription. Fix: SOS-specific error handling with separate recovery path. If pipeline crashes in Emergency mode → restart pipeline in Emergency mode, not fall through to Idle.
 **⚠️ SOS failures NEVER fall through to normal recording path.**
 
-### ADR-06: Speaker diarization deferred to v1.1
+#### ADR-16: Model Strategy — single small-q4_0 for all devices ← NEW
 **Decision:** NOT in v1.0. Adds ~200 MB (pyannote model), 2-3× latency. Original Benetto diarization was 6/10 (buggy). Deferred.
 
 ### ADR-07: Model download on Kotlin side
