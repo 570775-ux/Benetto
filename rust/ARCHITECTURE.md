@@ -320,3 +320,69 @@ pub enum SosError {
 **Decision:** SOS reuses the same streaming pipeline as normal transcription.
 **Rationale:** Original Benetto had SOS as a separate code path → duplication, bugs only in SOS path. New architecture: SOS = PipelineMode::Emergency with additional periodic SMS task.
 **Impact:** Bug fixes in streaming pipeline automatically fix SOS. No separate whisper context, no duplicate audio capture.
+
+### SOS Activation: Two Entry Points
+
+```
+┌─────────────────────┐     ┌──────────────────────┐
+│  In-App SOS Button   │     │  5 Power Button Taps │
+│  (SosScreen.kt)      │     │  (SosBootReceiver)   │
+│  User: "I need help" │     │  System-level panic  │
+└─────────┬───────────┘     └──────────┬───────────┘
+          │                            │
+          └──────────┬─────────────────┘
+                     ↓
+          EmergencyService.start(sosConfig)
+                     ↓
+          SosOrchestrator::start(Rust)
+                     ↓
+          ┌──────────┴──────────┐
+          │  streaming pipeline  │
+          │  + periodic SMS      │
+          └─────────────────────┘
+```
+
+**In-app activation:** User opens Benetto → taps SOS button → SosScreen with countdown (3s) → confirmation → EmergencyService starts.
+**System activation:** 5 power button taps detected by `SosBootReceiver` → EmergencyService starts immediately (no confirmation).
+**Rust side:** Same `SosOrchestrator::start()` regardless of entry point. `SosConfig.activation_source` distinguishes for logging.
+
+### New JNI Export
+
+```kotlin
+// Added to BenettoNative.kt
+external fun activateSos(
+    contactsJson: String,     // JSON array of {name, phone}
+    userName: String,
+    activationSource: Int     // 0=in-app, 1=power-button
+): Int                        // Returns SosState ordinal
+```
+
+### SOS Activation: Two Entry Points
+
+```
+In-App SOS Button                 5 Power Button Taps
+(SosScreen.kt, countdown 3s)      (SosBootReceiver, immediate)
+         │                                │
+         └────────────┬───────────────────┘
+                      ↓
+           EmergencyService.start(config)
+                      ↓
+           SosOrchestrator::start()  ← SAME Rust pipeline
+                      ↓
+           ┌─────────┴─────────┐
+           │ streaming pipeline │
+           │ + periodic SMS     │
+           └───────────────────┘
+```
+
+**In-app:** User opens Benetto → SOS tab → countdown 3s → confirm → start.
+**Power button:** 5 taps → no confirmation → immediate start.
+**Rust side:** Same `SosOrchestrator::start()` for both. `activation_source: 0|1` in config for logging.
+
+### New JNI Export for SOS
+
+```kotlin
+// Added to BenettoNative.kt
+external fun activateSos(contactsJson: String, userName: String, source: Int): Int
+// Returns: 0=Idle, 1=Active, -1=Error(NoContacts), -2=Error(RecorderFailed)
+```
