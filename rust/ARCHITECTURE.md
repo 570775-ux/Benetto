@@ -237,3 +237,86 @@ pub extern "C" fn Java_com_whispercppdemo_BenettoNative_release(
 6. Phase 6 (CODER): Implement llm/engine.rs
 7. Phase 7 (REVIEWER): Full review cycle
 8. Phase 8 (TESTER): Cross-compile + integration tests
+
+---
+
+## SOS Module: Emergency Pipeline (ADR-05)
+
+### User Flow (from original Benetto review)
+```
+1. 5 power-button taps → EmergencyService starts (foreground)
+2. SMS to trusted contacts with GPS location → starts recording
+3. Streaming transcription → keyword detection
+4. Every 5 min: partial SMS (location + transcription snippet)
+5. On stop: final SMS with full transcription
+6. After reboot: SosBootReceiver restarts service
+```
+
+### Critical Bugs in Original → Rust Fixes
+
+| Bug | Severity | Rust Fix |
+|-----|----------|----------|
+| EmergencyReceiver never unregistered → OOM | CRITICAL | `Drop` trait auto-cleans when service stops |
+| `exported=false` → no reboot survival | CRITICAL | Manifest fix + `Option<BootState>` recovery check |
+| `sendInitialSOS()` no retry → life-critical SMS lost | MAJOR | `retry(3, backoff=1s,4s,16s)` via `Result<Sent,Failed>` |
+| Location can be 2h stale → user searches wrong place | MAJOR | `LocationAge` enum: Fresh(<30s), Recent(<5m), Stale(>5m) |
+| Battery opt not tracked → app killed mid-SOS | MINOR | `BatteryState::is_exempted: bool` checked on start |
+
+### SOS in Rust Pipeline
+
+```
+JNI: activateSos(contacts, userName, keywords)
+       ↓
+SosOrchestrator::start()
+  ├── SmsNotifier::send_initial(contacts, location, userName)  [retry×3]
+  ├── audio::Recorder::start() → ring_buffer → chunk_tx
+  ├── LocationTracker::start_periodic(5min) → LocationAge enum
+  ├── KeywordDetector::start(keywords + silence>30s)
+  └── tokio::spawn(PeriodicSmsTask every 5min) → partial text + location → SMS
+```
+
+### New Types
+
+```rust
+pub struct SosConfig {
+    pub contacts: Vec<TrustedContact>,
+    pub user_name: String,
+    pub interval: Duration,          // Partial SMS interval: 5 min
+    pub silence_timeout: Duration,   // Auto-SOS on silence: 30 sec
+    pub keywords: Vec<String>,       // ["помогите", "sos", "помощь"]
+}
+
+pub enum LocationAge {
+    Fresh(Duration),    // < 30s — "📍"
+    Recent(Duration),   // < 5min — "📍 ~5min ago"
+    Stale(Duration),    // > 5min — "⚠️ STALE: 2h"
+}
+
+pub enum SosState {
+    Idle,
+    Active { start: Instant, last_sms: Instant, chunks: u32, keywords: Vec<String> },
+    Error(SosError),
+}
+
+pub enum SosError {
+    NoContacts, SmsFailed { contact: String, attempt: u32 },
+    RecorderFailed, TranscriptionFailed,
+}
+```
+
+### SOS Quality Gates
+
+| Gate | Test |
+|------|------|
+| **SMS retry** | Fail ×3 with backoff → verify error logged, attempt counter |
+| **Location stale** | GPS age > 5min → SMS includes "⚠️ STALE LOCATION" |
+| **Memory leak** | Start/stop SOS 100× → RAM returns to baseline ± 5 MB |
+| **Silence detect** | Feed 30s silence → auto-SOS trigger |
+| **Keyword match** | Feed audio with "помогите" → flag in keywords list |
+| **Cold start SMS** | SOS within 3s of boot → SMS sent with "(after reboot)" |
+| **No contacts** | empty contacts → SosState::Error(NoContacts), no crash |
+
+### ADR-05: SOS is a first-class pipeline mode, not an addon
+**Decision:** SOS reuses the same streaming pipeline as normal transcription.
+**Rationale:** Original Benetto had SOS as a separate code path → duplication, bugs only in SOS path. New architecture: SOS = PipelineMode::Emergency with additional periodic SMS task.
+**Impact:** Bug fixes in streaming pipeline automatically fix SOS. No separate whisper context, no duplicate audio capture.
