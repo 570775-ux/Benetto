@@ -1,0 +1,39 @@
+# Gradle
+.gradle/
+build/
+*/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Signing
+*.jks
+*.keystore
+release-key*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# Android
+*.apk
+*.aab
+local.properties
+captures/
+.externalNativeBuild/
+
+# Misc
+*.log
+.cache/
+*.tar.gz
+*.zip
