@@ -1,6 +1,7 @@
 package com.whispercppdemo.ui.main
 
 import android.app.Application
+import android.content.Context
 import android.media.MediaPlayer
 import android.util.Log
 import androidx.compose.runtime.getValue
@@ -12,6 +13,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.whispercppdemo.llm.LlamaInference
 import com.whispercppdemo.media.decodeWaveFile
 import com.whispercppdemo.recorder.Recorder
 import com.whispercpp.whisper.WhisperContext
@@ -29,6 +31,10 @@ class MainScreenViewModel(private val application: Application) : ViewModel() {
     var dataLog by mutableStateOf("")
         private set
     var isRecording by mutableStateOf(false)
+        private set
+    var llmAvailable by mutableStateOf(false)
+        private set
+    var summary by mutableStateOf("")
         private set
 
     private val modelsPath = File(application.filesDir, "models")
@@ -55,10 +61,31 @@ class MainScreenViewModel(private val application: Application) : ViewModel() {
             copyAssets()
             loadBaseModel()
             canTranscribe = true
+            initLLM()
         } catch (e: Exception) {
             Log.w(LOG_TAG, e)
             printMessage("${e.localizedMessage}\n")
         }
+    }
+
+    private suspend fun initLLM() = withContext(Dispatchers.IO) {
+        printMessage("Loading Qwen2.5-0.5B LLM...\n")
+        val ok = LlamaInference.initialize(application.assets)
+        if (ok) {
+            llmAvailable = true
+            printMessage("LLM ready for summarization.\n")
+        } else {
+            printMessage("LLM not available. Summaries disabled.\n")
+        }
+    }
+
+    suspend fun generateSummary(text: String) {
+        if (!llmAvailable) return
+        summary = ""
+        printMessage("Generating summary...\n")
+        val result = LlamaInference.summarize(text)
+        summary = result
+        printMessage("Summary: $result\n")
     }
 
     private suspend fun printMessage(msg: String) = withContext(Dispatchers.Main) {
@@ -139,7 +166,10 @@ class MainScreenViewModel(private val application: Application) : ViewModel() {
             if (isRecording) {
                 recorder.stopRecording()
                 isRecording = false
-                recordedFile?.let { transcribeAudio(it) }
+                recordedFile?.let { file ->
+                    transcribeAudio(file)
+                    if (llmAvailable) generateSummary(dataLog)
+                }
             } else {
                 stopPlayback()
                 val file = getTempFileForRecording()
@@ -169,6 +199,7 @@ class MainScreenViewModel(private val application: Application) : ViewModel() {
         runBlocking {
             whisperContext?.release()
             whisperContext = null
+            LlamaInference.release()
             stopPlayback()
         }
     }
@@ -186,11 +217,12 @@ class MainScreenViewModel(private val application: Application) : ViewModel() {
 private suspend fun Context.copyData(
     assetDirName: String, destDir: File, printMessage: suspend (String) -> Unit
 ) = withContext(Dispatchers.IO) {
-    assets.list(assetDirName)?.forEach { name ->
+    val files: Array<String>? = assets.list(assetDirName)
+    files?.forEach { name: String ->
         val dp = "$assetDirName/$name"
         val dest = File(destDir, name)
         assets.open(dp).use { input ->
-            dest.outputStream().use { output -> input.copyTo(output) }
+            dest.outputStream().use { output: java.io.OutputStream -> input.copyTo(output) }
         }
     }
 }
