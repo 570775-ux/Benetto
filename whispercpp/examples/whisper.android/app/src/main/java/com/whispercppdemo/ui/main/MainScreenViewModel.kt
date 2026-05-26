@@ -14,6 +14,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.whispercppdemo.media.decodeWaveFile
+import com.whispercppdemo.model.ModelDownloader
 import com.whispercppdemo.recorder.Recorder
 import com.whispercpp.whisper.WhisperContext
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +31,10 @@ class MainScreenViewModel(private val application: Application) : ViewModel() {
     var dataLog by mutableStateOf("")
         private set
     var isRecording by mutableStateOf(false)
+        private set
+    var downloadProgress by mutableStateOf(-1)
+        private set
+    var isDownloading by mutableStateOf(false)
         private set
 
     private val modelsPath = File(application.filesDir, "models")
@@ -75,15 +80,27 @@ class MainScreenViewModel(private val application: Application) : ViewModel() {
     }
 
     private suspend fun loadBaseModel() = withContext(Dispatchers.IO) {
-        printMessage("Loading model...\n")
-        val models = application.assets.list("models/")
-        if (models != null) {
-            whisperContext = com.whispercpp.whisper.WhisperContext.createContextFromAsset(application.assets, "models/" + models[0])
-            printMessage("Loaded model ${models[0]}.\n")
+        // Download Whisper Small model if not present
+        isDownloading = true
+        downloadProgress = 0
+        
+        val modelFile = ModelDownloader.getModel(application) { progress ->
+            viewModelScope.launch {
+                withContext(Dispatchers.Main) {
+                    downloadProgress = progress
+                    if (progress % 25 == 0) {
+                        printMessage("Downloading Whisper Small model: ${progress}%\n")
+                    }
+                }
+            }
         }
-
-        //val firstModel = modelsPath.listFiles()!!.first()
-        //whisperContext = WhisperContext.createContextFromFile(firstModel.absolutePath)
+        
+        isDownloading = false
+        downloadProgress = 100
+        
+        printMessage("Loading Whisper Small model (466 MB)...\n")
+        whisperContext = WhisperContext.createContextFromFile(modelFile.absolutePath)
+        printMessage("Loaded Whisper Small model.\n")
     }
 
     fun benchmark() = viewModelScope.launch {

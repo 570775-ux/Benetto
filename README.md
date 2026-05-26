@@ -12,9 +12,9 @@ Record voice notes and transcribe them directly on your Android device using Whi
 ## ✨ Features
 
 - 🎙️ **Record & Transcribe** — one tap to capture audio, automatic transcription
-- 🔒 **100% Local** — Whisper.cpp runs on-device, zero network requests
+- 🔒 **100% Local** — Whisper Small (466 MB) runs on-device after first download, zero network requests for transcription
 - 🌍 **Multilingual** — Russian, English, and 97+ languages via Whisper models
-- ⚡ **Fast** — optimized Whisper Small model, 2-3x real-time on modern devices
+- ⚡ **Quality** — Whisper Small model for high accuracy speech recognition across 99 languages
 - 📱 **Android 8+** — works on devices from 2017 onward
 - 🎨 **Material Design** — clean, simple UI
 
