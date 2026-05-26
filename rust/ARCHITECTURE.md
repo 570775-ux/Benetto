@@ -386,3 +386,46 @@ In-App SOS Button                 5 Power Button Taps
 external fun activateSos(contactsJson: String, userName: String, source: Int): Int
 // Returns: 0=Idle, 1=Active, -1=Error(NoContacts), -2=Error(RecorderFailed)
 ```
+
+---
+
+## Gap Analysis: Original Benetto vs Rust Architecture
+
+### Covered ✅
+| Original | Rust Equivalent | Improvement |
+|----------|----------------|-------------|
+| WhisperPipeline.kt (6/10) | whisper/engine.rs | Compile-time safety, no JNI overhead |
+| RealWhisperPipeline.kt (8.5/10) | Merged into whisper/engine.rs | One implementation, not two |
+| VadPipeline.kt (6.5/10) | vad/detector.rs | Same VAD model, Rust wrapper |
+| QwenPipeline.kt (8.5/10) | llm/engine.rs | Same model, native candle inference |
+| FullPipelineManager.kt (8.5/10) | pipeline.rs | Streaming + FSM, no GC pauses |
+| 11 SOS files | 4 SOS modules | Bug fixes embedded in design |
+| whisper_jni.cpp + llama_jni.cpp | lib.rs + jni_bridge.rs | No double-free, no memory leaks |
+
+### Not Covered (Kotlin/Compose stays) ⚠️
+| Original | Status |
+|----------|--------|
+| 16 UI files (HomeScreen, RecordScreen, etc.) | Kotlin/Compose — stays as-is |
+| AppDatabase.kt + RecordingRepository.kt | Room (SQLite) — stays on Kotlin |
+| Navigation.kt | Jetpack Navigation — stays |
+
+### Not Yet Covered ❌
+| Feature | Original Score | Priority | Notes |
+|---------|---------------|----------|-------|
+| **Speaker Diarization** | 6/10 (buggy) | P2 | "Who spoke when" — needs pyannote or similar ONNX model. Add after whisper+llm work. |
+| **Model Download Manager** | 8.5/10 (solid) | P1 | Download gguf/ggml from HuggingFace. Needed before APK release. Kotlin-side (DownloadManager API), but needs Rust callback for progress. |
+| **Recording Repository** | 9.5/10 (solid) | P1 | Room DB for recordings history. Kotlin-side, but Rust needs to provide transcription text for storage. |
+
+### ADR-06: Speaker Diarization — defer to v1.1
+**Decision:** Diarization NOT in v1.0 Rust core. Original implementation was buggy (6/10).
+**Rationale:** Adds ~200 MB (pyannote model), increases latency 2-3×. v1.0 focus: reliable streaming transcription + SOS.
+**v1.1 plan:** ONNX-based speaker embedding model via candle, or pyannote-rs if available.
+
+### ADR-07: Model Download Manager — Kotlin-side with Rust progress callback
+**Decision:** Download logic in Kotlin (Android DownloadManager API), download progress + verification callback to Rust.
+**Rationale:** Android DownloadManager handles WiFi-only, retry, notification. Rust receives model path and verifies checksum (SHA256) before loading.
+**JNI interface:**
+```kotlin
+external fun verifyModel(path: String): Boolean  // SHA256 check
+external fun getModelVersion(path: String): String  // Returns "small" / "qwen-0.5b"
+```
