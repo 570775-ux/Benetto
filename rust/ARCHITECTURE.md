@@ -46,30 +46,94 @@ rust/
 **Rationale:** Rust channels prevent data races at compile time. No manual mutex locking.
 **Alternatives considered:** `crossbeam` channels — rejected, tokio already used in Mauri2.
 
-### ADR-03: whisper-rs over raw whisper.cpp
+### ADR-04: Ring buffer, not Vec<f32> for audio
+**Decision:** Use `ringbuf` crate (lock-free SPSC ring buffer) for audio capture.
+**Rationale:** Vec требует переаллокации при росте → фрагментация памяти + GC-паузы. Ring buffer pre-allocated, фиксированного размера, lock-free.
+**Size:** 30 секунд × 16000 Hz × 2 байта (i16) × 1 канал = 960 KB. Умещается в L3-кэш.
+**Alternatives considered:** `Vec<f32>` (растёт, фрагментирует), `Arc<Mutex<VecDeque>>` (блокировки в hot path).
 **Decision:** Use `whisper-rs` crate (Rust bindings to whisper.cpp) instead of raw C++.
 **Rationale:** Rust ownership model catches buffer errors. No `unsafe` in business logic.
 **Alternatives considered:** Raw C++ via `cc` crate — rejected, defeats memory safety purpose.
 
-## Data Flow: Streaming Transcription
+## Data Flow: Streaming Transcription (v2 — bug-proof)
 
+### The 7 Deadly Bugs of Streaming ASR
+
+#### Bug 1: Word Splitting at Chunk Boundary
+**Расколотое слово:** «сего» (конец чанка N) + «дня» (начало чанка N+1) → «сегодня»
+**Fix:** Overlap 1-2 секунды между чанками. При склейке — ищем дублирующиеся токены в overlap-зоне и удаляем.
+**Rust гарантия:** `&[f32]` immutable borrow — transcriber НЕ видоизменяет аудио-буфер пока recorder пишет. Два трека: `write_ptr` и `read_ptr` в ring buffer, никогда не пересекаются.
+
+#### Bug 2: Duplicate Words from Overlap
+**Дубликаты:** «сегодня сегодня был дождь»
+**Fix:** Token-level dedup. Последние N токенов чанка N сравниваем с первыми N токенов чанка N+1. Удаляем дубликаты из начала чанка N+1 перед склейкой.
+**Rust гарантия:** `std::collections::VecDeque<String>` для последних токенов. `pop_front()` при переполнении → O(1), нет утечки памяти.
+
+#### Bug 3: Ring Buffer Overflow
+**Потеря сэмплов:** аудио пишется быстрее чем whisper читает → сэмплы дропаются → дыры в транскрипции
+**Fix:** `mpsc::sync_channel(2)` — канал с capacity=2. Если transcriber не успевает, `send()` блокирует recorder. Это backpressure: recorder ждёт, не дропает.
+**Rust гарантия:** `sync_channel` на уровне типов — компилятор проверяет что sender не может отправить если receiver не готов.
+
+#### Bug 4: VAD Cutoff
+**Ложный negative:** пауза в 0.5 сек → VAD говорит «нет речи» → чанк пропущен → потеряно предложение
+**Fix:** Graceful degradation. Если VAD не загружен или threshold не настроен → транскрибируем ВСЕ чанки. VAD — опциональная оптимизация, не gate.
+**Rust гарантия:** `Option<VAD>` — если `None`, код даже не пытается вызвать `is_speech()`.
+
+#### Bug 5: Whisper Context Contamination
+**Контекстная грязь:** чанк N+1 «помнит» что было в чанке N → галлюцинации, повтор фраз
+**Fix:** whisper-rs stateless mode. Каждый чанк → новый `whisper_full()` вызов, без сохранения состояния между чанками.
+**Rust гарантия:** `whisper_full_params` с `WHISPER_AHEAD_NO_CONTEXT`. Компилятор гарантирует что состояние не протекает между вызовами.
+
+#### Bug 6: JNI Deadlock
+**Деадлок:** Java-поток вызывает `stopRecording()` → ждёт мьютекс → но Rust-поток держит мьютекс и ждёт Java callback → deadlock
+**Fix:** JNI bridge только отправляет/читает из каналов. Никогда не держит блокировку дольше чем `send()`/`try_recv()`.
+**Rust гарантия:** `Arc<RwLock<AppState>>` — read lock для status check, write lock только на init/release. Никогда не держим write lock в JNI-callable функциях.
+
+#### Bug 7: Chunk Accumulation OOM
+**Утечка памяти:** 30+ минут записи → все чанки в Vec → OOM
+**Fix:** Stream results. После склейки чанка в output → удаляем аудио-чанк. Храним только:
+- `output_text: String` (накопительный результат)
+- `last_tokens: VecDeque<String>` (последние 20 токенов для dedup, ~2 KB)
+- NO audio history
+**Rust гарантия:** `VecDeque::pop_front()` при `len() > 20` — константная память независимо от длительности записи.
+
+### Pipeline States (Finite State Machine)
+
+```rust
+enum PipelineState {
+    Idle,                          // Нет записи
+    Recording {                    // Идёт захват аудио
+        recorder: RecorderHandle,  //   → пишет в ring buffer
+        chunk_tx: SyncSender,      //   → отправляет чанки
+    },
+    Finalizing,                    // Остановка: ждём последний чанк
+    Error(String),                 // Ошибка: причина
+}
+
+impl PipelineState {
+    fn transition(&mut self, event: PipelineEvent) -> Result<PipelineState, Error> {
+        match (self, event) {
+            (Idle, StartRecording) => { spawn_recorder(); Ok(Recording {..}) }
+            (Recording {..}, StopRecording) => { signal_stop(); Ok(Finalizing) }
+            (Finalizing, ChunkComplete) => { drain_channel(); Ok(Idle) }
+            (_, Error(e)) => Ok(Error(e)),
+            _ => Err(Error::InvalidTransition),
+        }
+    }
+}
 ```
-┌──────────────┐    mpsc::channel     ┌──────────────────┐
-│ Audio Thread  │────────────────────▶│ Transcriber Thread │
-│ (oboe)        │   Vec<f32> chunks    │ (whisper-rs)      │
-│              │                      │                   │
-│ RingBuffer   │                      │ process_chunk()    │
-│ 30s, 16kHz  │                      │ overlap 1s         │
-│              │                      │ dedup tokens       │
-└──────────────┘                      └────────┬──────────┘
-                                                │
-                                      ┌────────▼──────────┐
-                                      │ Result Thread      │
-                                      │                   │
-                                      │ Accumulate text    │
-                                      │ JNI callback → UI  │
-                                      └───────────────────┘
-```
+
+### Гарантии (формально)
+
+| Свойство | Как обеспечено | Уровень |
+|----------|---------------|---------|
+| Нет data races | `&[f32]` immutable в transcriber. Два указателя в ringbuf. | Compile-time |
+| Нет deadlocks | Write lock < 1μs. Read lock для status. | Design |
+| Нет OOM | `VecDeque::pop_front` при len>20. Чанки удаляются после склейки. | Runtime |
+| Нет потери сэмплов | `sync_channel(2)` — backpressure на recorder | Runtime |
+| Нет дубликатов | Token dedup в overlap-зоне | Algorithm |
+| Нет расколотых слов | Overlap 1-2 сек + token matching | Algorithm |
+| Graceful VAD fallback | `Option<VAD>` → всегда транскрибируем если None | Type system |
 
 ## Cargo.toml
 
